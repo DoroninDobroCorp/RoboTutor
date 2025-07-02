@@ -1,6 +1,7 @@
 import asyncio
 import os
 import struct
+import string # Импортируем для работы с пунктуацией
 import pyaudio
 import pvporcupine
 import vertexai
@@ -20,6 +21,8 @@ CHANNELS = 1
 RATE = 16000 
 CHUNK = 1024
 PORCUPINE_FRAME_LENGTH = 512
+# Ключевые фразы для завершения диалога
+STOP_PHRASES = ["стоп", "хватит", "до свидания", "спасибо хватит", "завершить диалог"]
 # --- КОНЕЦ НАСТРОЕК ---
 
 
@@ -32,7 +35,6 @@ async def play_audio_from_queue(queue: asyncio.Queue):
         try:
             audio_chunk = await asyncio.wait_for(queue.get(), timeout=1.0)
             if audio_chunk is None: break
-            print(f"  -> 🔊 [Плеер]: Воспроизвожу {len(audio_chunk)} байт аудио...")
             stream.write(audio_chunk)
         except asyncio.TimeoutError:
             continue
@@ -42,7 +44,7 @@ async def play_audio_from_queue(queue: asyncio.Queue):
 
 async def start_gemini_dialogue(mic_stream, audio_queue):
     """
-    Реализует диалог по правильной схеме "Запись-Отправка-Получение".
+    Реализует полноценный диалог, который продолжается до команды "стоп".
     """
     print("\n🚀 Подключаюсь к Gemini через Live API...")
 
@@ -52,69 +54,87 @@ async def start_gemini_dialogue(mic_stream, audio_queue):
         location=GOOGLE_CLOUD_LOCATION,
     )
 
+    # Включаем транскрипцию для распознавания стоп-слов
     config = {
-        "response_modalities": ["AUDIO"]
+        "response_modalities": ["AUDIO"],
+        "input_audio_transcription": {}, 
     }
 
     try:
         async with client.aio.live.connect(model=GEMINI_MODEL_NAME, config=config) as session:
-            print("✅ Соединение установлено. Говорите, я запишу вашу фразу целиком.")
+            print("✅ Соединение установлено.")
 
-            # --- Фаза 1: Запись ---
-            audio_chunks = []
-            is_speaking = False
-            silence_frames = 0
-            SILENCE_THRESHOLD = 35 
-
-            while True:
-                audio_chunk = mic_stream.read(CHUNK, exception_on_overflow=False)
-                unpacked_chunk = struct.unpack(f'{CHUNK}h', audio_chunk)
-                is_currently_speaking = any(abs(sample) > 500 for sample in unpacked_chunk)
-                if is_currently_speaking:
-                    if not is_speaking: print("🎤 Обнаружена речь, идет запись...")
-                    is_speaking = True
-                    silence_frames = 0
-                    audio_chunks.append(audio_chunk)
-                elif is_speaking:
-                    silence_frames += 1
-                    audio_chunks.append(audio_chunk) 
-                    if silence_frames > SILENCE_THRESHOLD:
-                        print("🔇 Обнаружена тишина. Запись завершена.")
-                        break
-                if not is_speaking and not audio_chunks and silence_frames > 50:
-                    print("🤷‍♂️ Не было произнесено ни слова. Возврат в режим ожидания.")
-                    return
-                silence_frames +=1
-            if not audio_chunks: return
-
-            # --- Фаза 2: Отправка ---
-            print("📦 Упаковываю аудио и инструкцию в один запрос...")
-            full_audio_data = b''.join(audio_chunks)
-
-            content = types.Content(role="user", parts=[
-                types.Part(text="Ты — голосовой ассистент по имени Марвин. Ответь на следующий аудио-запрос коротко и по делу."),
-                types.Part(inline_data=types.Blob(mime_type="audio/pcm;rate=16000", data=full_audio_data))
+            # --- Фаза 1: Отправка системной инструкции ---
+            print("🗣️  Отправляю системную инструкцию...")
+            system_prompt = types.Content(role="user", parts=[
+                types.Part(text="Ты — голосовой ассистент по имени Марвин. Отвечай на запросы коротко и по делу.")
             ])
-            
-            await session.send_client_content(turns=content, turn_complete=True)
-            print("✅ Запрос отправлен. Ожидаю ответ...")
+            await session.send_client_content(turns=system_prompt, turn_complete=True)
 
-            # --- Фаза 3: Получение ---
-            async for response in session.receive():
-                print("  <- 📦 [Получатель]: Получен пакет от сервера!")
-                if response.server_content and response.server_content.model_turn:
-                    print("    - ✅ Пакет содержит контент от модели.")
-                    for part in response.server_content.model_turn.parts:
-                        
-                        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-                        # Правильно извлекаем аудио из part.inline_data.data
-                        if part.inline_data and part.inline_data.data:
-                            audio_data = part.inline_data.data
-                            print(f"      - ✅✅✅ Найден аудио-фрагмент! Размер: {len(audio_data)} байт.")
-                            await audio_queue.put(audio_data)
-                        else:
-                            print("      - ❌ В этой части нет аудио.")
+            # --- Фаза 2: Диалоговый цикл ---
+            while True: 
+                print("\n🎙️  Слушаю ваш следующий вопрос... (Скажите 'стоп' или 'хватит' для завершения)")
 
+                # --- Запись очередного вопроса ---
+                audio_chunks = []
+                is_speaking = False
+                silence_frames = 0
+                SILENCE_THRESHOLD = 35 
+
+                while True:
+                    audio_chunk = mic_stream.read(CHUNK, exception_on_overflow=False)
+                    unpacked_chunk = struct.unpack(f'{CHUNK}h', audio_chunk)
+                    is_currently_speaking = any(abs(sample) > 500 for sample in unpacked_chunk)
+                    if is_currently_speaking:
+                        if not is_speaking: print("   -> 🎤 Обнаружена речь, идет запись...")
+                        is_speaking = True
+                        silence_frames = 0
+                        audio_chunks.append(audio_chunk)
+                    elif is_speaking:
+                        silence_frames += 1
+                        audio_chunks.append(audio_chunk) 
+                        if silence_frames > SILENCE_THRESHOLD:
+                            print("   -> 🔇 Обнаружена тишина. Запись завершена.")
+                            break
+                    if not is_speaking and not audio_chunks and silence_frames > 50:
+                        print("   -> 🤷‍♂️ Не было произнесено ни слова.")
+                        continue
+                    silence_frames +=1
+                
+                if not audio_chunks: continue
+
+                # --- Отправка записанного аудио ---
+                full_audio_data = b''.join(audio_chunks)
+                audio_part = types.Part(inline_data=types.Blob(mime_type="audio/pcm;rate=16000", data=full_audio_data))
+                await session.send_client_content(turns=types.Content(role="user", parts=[audio_part]), turn_complete=True)
+                print("   -> ✅ Запрос отправлен. Ожидаю ответ...")
+
+                # --- Получение ответа и проверка на стоп-слово ---
+                stop_conversation = False
+                full_transcript = ""
+                async for response in session.receive():
+                    
+                    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: ПРАВИЛЬНЫЙ ПУТЬ К ТРАНСКРИПЦИИ ---
+                    if response.server_content and response.server_content.input_transcription:
+                        # Собираем полный транскрипт, т.к. он может приходить по частям
+                        full_transcript += response.server_content.input_transcription.text
+                    
+                    if response.server_content and response.server_content.model_turn:
+                        for part in response.server_content.model_turn.parts:
+                            if part.inline_data and part.inline_data.data:
+                                await audio_queue.put(part.inline_data.data)
+
+                # Проверяем стоп-слова после получения всех частей транскрипта
+                if full_transcript:
+                    print(f"   -> [Вы сказали]: '{full_transcript}'")
+                    translator = str.maketrans('', '', string.punctuation)
+                    clean_transcript = full_transcript.lower().translate(translator)
+                    if any(phrase in clean_transcript for phrase in STOP_PHRASES):
+                        print("   -> 🛑 Обнаружено стоп-слово. Завершаю диалог.")
+                        stop_conversation = True
+                
+                if stop_conversation:
+                    break # Выходим из диалогового цикла
 
     except Exception as e:
         print(f"⚠️ Произошла ошибка во время диалога с Gemini: {e}")
