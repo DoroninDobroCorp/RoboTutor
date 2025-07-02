@@ -5,7 +5,6 @@ import pyaudio
 import pvporcupine
 import vertexai
 from google import genai
-# ИСПРАВЛЕНИЕ: Мы импортируем types, чтобы получить доступ к types.Blob
 from google.genai import types
 
 # --- ОБЯЗАТЕЛЬНЫЕ НАСТРОЙКИ ---
@@ -33,6 +32,7 @@ async def play_audio_from_queue(queue: asyncio.Queue):
         try:
             audio_chunk = await asyncio.wait_for(queue.get(), timeout=1.0)
             if audio_chunk is None: break
+            print(f"  -> 🔊 [Плеер]: Воспроизвожу {len(audio_chunk)} байт аудио...")
             stream.write(audio_chunk)
         except asyncio.TimeoutError:
             continue
@@ -42,7 +42,7 @@ async def play_audio_from_queue(queue: asyncio.Queue):
 
 async def start_gemini_dialogue(mic_stream, audio_queue):
     """
-    Основная логика диалога с Gemini, используя Live API с правильными объектами.
+    Реализует диалог по правильной схеме "Запись-Отправка-Получение".
     """
     print("\n🚀 Подключаюсь к Gemini через Live API...")
 
@@ -58,53 +58,63 @@ async def start_gemini_dialogue(mic_stream, audio_queue):
 
     try:
         async with client.aio.live.connect(model=GEMINI_MODEL_NAME, config=config) as session:
-            print("✅ Соединение установлено. Говорите. Для завершения фразы просто замолчите.")
+            print("✅ Соединение установлено. Говорите, я запишу вашу фразу целиком.")
 
-            is_dialogue_active = True
+            # --- Фаза 1: Запись ---
+            audio_chunks = []
+            is_speaking = False
+            silence_frames = 0
+            SILENCE_THRESHOLD = 35 
 
-            async def send_audio():
-                nonlocal is_dialogue_active
-                is_speaking = False
-                silence_frames = 0
-                SILENCE_THRESHOLD = 35
+            while True:
+                audio_chunk = mic_stream.read(CHUNK, exception_on_overflow=False)
+                unpacked_chunk = struct.unpack(f'{CHUNK}h', audio_chunk)
+                is_currently_speaking = any(abs(sample) > 500 for sample in unpacked_chunk)
+                if is_currently_speaking:
+                    if not is_speaking: print("🎤 Обнаружена речь, идет запись...")
+                    is_speaking = True
+                    silence_frames = 0
+                    audio_chunks.append(audio_chunk)
+                elif is_speaking:
+                    silence_frames += 1
+                    audio_chunks.append(audio_chunk) 
+                    if silence_frames > SILENCE_THRESHOLD:
+                        print("🔇 Обнаружена тишина. Запись завершена.")
+                        break
+                if not is_speaking and not audio_chunks and silence_frames > 50:
+                    print("🤷‍♂️ Не было произнесено ни слова. Возврат в режим ожидания.")
+                    return
+                silence_frames +=1
+            if not audio_chunks: return
 
-                while is_dialogue_active:
-                    audio_chunk = mic_stream.read(CHUNK, exception_on_overflow=False)
+            # --- Фаза 2: Отправка ---
+            print("📦 Упаковываю аудио и инструкцию в один запрос...")
+            full_audio_data = b''.join(audio_chunks)
 
-                    unpacked_chunk = struct.unpack(f'{CHUNK}h', audio_chunk)
-                    is_currently_speaking = any(abs(sample) > 500 for sample in unpacked_chunk)
+            content = types.Content(role="user", parts=[
+                types.Part(text="Ты — голосовой ассистент по имени Марвин. Ответь на следующий аудио-запрос коротко и по делу."),
+                types.Part(inline_data=types.Blob(mime_type="audio/pcm;rate=16000", data=full_audio_data))
+            ])
+            
+            await session.send_client_content(turns=content, turn_complete=True)
+            print("✅ Запрос отправлен. Ожидаю ответ...")
 
-                    if is_currently_speaking:
-                        if not is_speaking: print("🎤 Обнаружена речь...")
-                        is_speaking = True
-                        silence_frames = 0
-                    elif is_speaking:
-                        silence_frames += 1
-                    
-                    # --- ИСПРАВЛЕНИЕ #1: ПРАВИЛЬНАЯ УПАКОВКА АУДИО ---
-                    # Мы создаем объект Part, передавая ему inline_data,
-                    # который содержит объект Blob с нашими аудио-байтами и MIME-типом.
-                    part = types.Part(inline_data=types.Blob(mime_type="audio/pcm;rate=16000", data=audio_chunk))
-                    
-                    await session.send_client_content(
-                        turns=types.Content(role="user", parts=[part])
-                    )
-                    
-                    if is_speaking and silence_frames > SILENCE_THRESHOLD:
-                        print("🔇 Обнаружена тишина. Завершаю реплику...")
-                        await session.send_client_content(turn_complete=True)
-                        is_dialogue_active = False
-                
-            async def receive_audio():
-                async for response in session.receive():
-                    if response.server_content and response.server_content.model_turn:
-                        for part in response.server_content.model_turn.parts:
-                            if part.audio:
-                                await audio_queue.put(part.audio.data)
+            # --- Фаза 3: Получение ---
+            async for response in session.receive():
+                print("  <- 📦 [Получатель]: Получен пакет от сервера!")
+                if response.server_content and response.server_content.model_turn:
+                    print("    - ✅ Пакет содержит контент от модели.")
+                    for part in response.server_content.model_turn.parts:
+                        
+                        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+                        # Правильно извлекаем аудио из part.inline_data.data
+                        if part.inline_data and part.inline_data.data:
+                            audio_data = part.inline_data.data
+                            print(f"      - ✅✅✅ Найден аудио-фрагмент! Размер: {len(audio_data)} байт.")
+                            await audio_queue.put(audio_data)
+                        else:
+                            print("      - ❌ В этой части нет аудио.")
 
-            send_task = asyncio.create_task(send_audio())
-            receive_task = asyncio.create_task(receive_audio())
-            await asyncio.gather(send_task, receive_task)
 
     except Exception as e:
         print(f"⚠️ Произошла ошибка во время диалога с Gemini: {e}")
@@ -132,18 +142,15 @@ async def main():
         audio_queue = asyncio.Queue()
         player_task = asyncio.create_task(play_audio_from_queue(audio_queue))
 
-        # --- ИСПРАВЛЕНИЕ #2: ПРАВИЛЬНЫЙ ЦИКЛ УПРАВЛЕНИЯ МИКРОФОНОМ ---
         while True:
             print("\n" + "="*40)
             print("🤖 Состояние: Жду активационную команду 'Марвин'...")
             
-            # 1. Открываем микрофон для Porcupine
             mic_stream = p_audio.open(
                 rate=porcupine.sample_rate, channels=CHANNELS, format=pyaudio.paInt16,
                 input=True, frames_per_buffer=PORCUPINE_FRAME_LENGTH
             )
             
-            # 2. Слушаем, пока не услышим "Марвин"
             while True:
                 pcm = mic_stream.read(porcupine.frame_length, exception_on_overflow=False)
                 pcm_unpacked = struct.unpack_from("h" * porcupine.frame_length, pcm)
@@ -152,19 +159,15 @@ async def main():
                     print("✅ 'Марвин' обнаружен!")
                     break
             
-            # 3. Закрываем микрофон Porcupine
             mic_stream.close()
 
-            # 4. Открываем микрофон заново с настройками для Gemini
             mic_stream = p_audio.open(
                 rate=RATE, channels=CHANNELS, format=FORMAT,
                 input=True, frames_per_buffer=CHUNK
             )
             
-            # 5. Запускаем диалог (даже если он упадет, мы вернемся в начало цикла)
             await start_gemini_dialogue(mic_stream, audio_queue)
             
-            # 6. Закрываем микрофон Gemini
             mic_stream.close()
 
     except pvporcupine.PorcupineError as e:
