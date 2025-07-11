@@ -7,24 +7,13 @@ import time
 import wave
 import openai
 from datetime import datetime
-from dotenv import load_dotenv
-
-# --- Загружаем переменные окружения из файла .env ---
-load_dotenv()
 
 # === НАСТРОЙКИ ===
-# Ключи теперь безопасно загружаются из файла .env
 KEYWORD_PATH = "marvin.ppn"
-ACCESS_KEY = os.getenv("PORCUPINE_ACCESS_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ACCESS_KEY = ""
 
-# --- Проверка, что ключи загрузились ---
-if not ACCESS_KEY or not OPENAI_API_KEY:
-    print("Ошибка: Не найдены ключи API в файле .env.")
-    print("Пожалуйста, создайте файл .env и добавьте в него PORCUPINE_ACCESS_KEY и OPENAI_API_KEY.")
-    exit()
-
-# Применяем ключ для OpenAI
+# ⛔ ВСТАВЬ СВОЙ НАСТОЯЩИЙ OPENAI API-КЛЮЧ!
+OPENAI_API_KEY =   # ← сюда твой ключ
 openai.api_key = OPENAI_API_KEY
 
 # === ЛОГ ===
@@ -54,9 +43,9 @@ def record_audio(filename="input.wav", record_seconds=5, rate=16000):
     wf.writeframes(b''.join(frames))
     wf.close()
 
-# === Распознавание речи (Whisper API) ===
+# === Распознавание речи (Whisper API)
 def transcribe(filename="input.wav"):
-    log("🧠 Распознаю аудио через Whisper...")
+    log("🧠 Распознаю аудио через Whisper (новый API)...")
     with open(filename, "rb") as f:
         transcript = openai.audio.transcriptions.create(
             model="whisper-1",
@@ -65,7 +54,7 @@ def transcribe(filename="input.wav"):
     log(f"📄 Распознан текст: {transcript.text}")
     return transcript.text
 
-# === GPT-ответ ===
+# === GPT-ответ
 def ask_gpt(prompt):
     log("🤖 Отправляю запрос в GPT...")
     response = openai.chat.completions.create(
@@ -79,17 +68,12 @@ def ask_gpt(prompt):
     log(f"🧠 Ответ GPT: {reply}")
     return reply
 
-# === ИНИЦИАЛИЗАЦИЯ Porcupine ===
+# === ИНИЦИАЛИЗАЦИЯ Porcupine
 log("🔧 Инициализация Porcupine...")
-try:
-    porcupine = pvporcupine.create(
-        access_key=ACCESS_KEY,
-        keyword_paths=[KEYWORD_PATH]
-    )
-except pvporcupine.PorcupineArgumentError as e:
-    log(f"Ошибка инициализации Porcupine (AccessKey?): {e}")
-    exit()
-
+porcupine = pvporcupine.create(
+    access_key=ACCESS_KEY,
+    keyword_paths=[KEYWORD_PATH]
+)
 
 pa = pyaudio.PyAudio()
 audio_stream = pa.open(
@@ -124,9 +108,7 @@ try:
 except KeyboardInterrupt:
     log("⛔ Завершение по Ctrl+C")
 finally:
-    if 'audio_stream' in locals() and audio_stream.is_active():
-        audio_stream.stop_stream()
-        audio_stream.close()
-    if 'porcupine' in locals():
-        porcupine.delete()
+    audio_stream.stop_stream()
+    audio_stream.close()
+    porcupine.delete()
     log("🧹 Очистка завершена. Пока!")
