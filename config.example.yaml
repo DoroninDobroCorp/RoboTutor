@@ -1,0 +1,47 @@
+# Voice Assistant configuration (example)
+# Copy this file to `config.yaml` and adjust values for your environment.
+# Do NOT commit `config.yaml` to git; it is ignored by .gitignore.
+
+assistant:
+  system_prompt: |
+    Ты — дружелюбный и краткий голосовой ассистент робота. Отвечай по-русски,
+    коротко и по делу. Если вопрос неясен — уточни.
+  model: gpt-4o-mini
+  temperature: 0.2
+  max_tokens: 60
+
+openai:
+  # Leave empty and set the API key via environment variable OPENAI_API_KEY
+  # Example (macOS/Linux): export OPENAI_API_KEY="sk-..."
+  api_key: ""
+
+asr:
+  engine: vosk
+  language: ru
+  vosk_model_name: vosk-model-small-ru-0.22
+  vosk_model_url: https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
+  sample_rate: 16000
+  vad:
+    aggressiveness: 2
+    frame_ms: 20
+    silence_ms_to_end: 500
+    max_record_ms: 10000
+
+tts:
+  engine: pyttsx3
+  voice: "com.apple.voice.compact.ru-RU.Milena"
+  rate: 200
+  volume: 1.0
+
+  piper:
+    # Provide these only if you plan to use Piper TTS
+    bin_path: ""
+    model_filename: ""
+    model_url: ""
+    speaker: ""
+    length_scale: 1.0
+    noise_scale: 0.667
+    noise_w: 0.8
+
+ui:
+  push_to_talk: true
